@@ -16,6 +16,7 @@ import time
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # 抓取数量配置
@@ -35,57 +36,110 @@ CATEGORY_CN = {
 }
 
 
-# ========== Gemini 翻译 ==========
-def translate_texts(texts: List[str]) -> List[str]:
-    """使用 Gemini API 批量翻译英文为中文"""
-    if not GEMINI_API_KEY or not texts:
-        return texts
+# ========== AI 翻译 ==========
+TRANSLATE_PROMPT = (
+    "请将以下英文文本逐条翻译为简洁的中文，保持编号格式。"
+    "只输出翻译结果，不要加任何解释。"
+    "专有名词（如公司名、产品名、人名）保留英文原文。\n\n"
+)
 
-    # 构建批量翻译 prompt
+
+def _parse_numbered_result(result_text: str, expected_count: int) -> Optional[List[str]]:
+    """解析编号格式的翻译结果"""
+    translated = []
+    for line in result_text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # 去掉编号前缀如 "1. " "1、" "1."
+        for prefix_len in range(1, 5):
+            if line[prefix_len:prefix_len+1] in ".、" and line[:prefix_len].isdigit():
+                line = line[prefix_len+1:].strip()
+                break
+        translated.append(line)
+
+    if len(translated) == expected_count:
+        return translated
+    print(f"翻译结果数量不匹配（期望 {expected_count}，得到 {len(translated)}）")
+    return None
+
+
+def _translate_nvidia(texts: List[str]) -> Optional[List[str]]:
+    """使用 NVIDIA Kimi K2.5 翻译"""
     numbered = "\n".join([f"{i+1}. {t}" for i, t in enumerate(texts)])
-    prompt = (
-        "请将以下英文文本逐条翻译为简洁的中文，保持编号格式。"
-        "只输出翻译结果，不要加任何解释。"
-        "专有名词（如公司名、产品名、人名）保留英文原文。\n\n"
-        f"{numbered}"
-    )
+    try:
+        resp = requests.post(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                "Accept": "application/json",
+            },
+            json={
+                "model": "moonshotai/kimi-k2.5",
+                "messages": [{"role": "user", "content": TRANSLATE_PROMPT + numbered}],
+                "max_tokens": 4096,
+                "temperature": 0.3,
+                "stream": False,
+            },
+            timeout=60
+        )
+        data = resp.json()
+        result_text = data["choices"][0]["message"]["content"]
+        return _parse_numbered_result(result_text, len(texts))
+    except Exception as e:
+        print(f"NVIDIA Kimi 翻译失败: {e}")
+        return None
 
+
+def _translate_gemini(texts: List[str]) -> Optional[List[str]]:
+    """使用 Gemini 翻译"""
+    numbered = "\n".join([f"{i+1}. {t}" for i, t in enumerate(texts)])
     try:
         resp = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
-            json={"contents": [{"parts": [{"text": prompt}]}]},
+            json={"contents": [{"parts": [{"text": TRANSLATE_PROMPT + numbered}]}]},
             timeout=30
         )
         data = resp.json()
         result_text = data["candidates"][0]["content"]["parts"][0]["text"]
-
-        # 解析编号结果
-        translated = []
-        for line in result_text.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            # 去掉编号前缀如 "1. " "1、" "1."
-            for prefix_len in range(1, 5):
-                if line[prefix_len:prefix_len+1] in ".、" and line[:prefix_len].isdigit():
-                    line = line[prefix_len+1:].strip()
-                    break
-            translated.append(line)
-
-        if len(translated) == len(texts):
-            return translated
-        else:
-            print(f"翻译结果数量不匹配（期望 {len(texts)}，得到 {len(translated)}），使用原文")
-            return texts
-
+        return _parse_numbered_result(result_text, len(texts))
     except Exception as e:
         print(f"Gemini 翻译失败: {e}")
+        return None
+
+
+def translate_texts(texts: List[str]) -> List[str]:
+    """批量翻译：优先 NVIDIA Kimi，降级 Gemini，都失败返回原文"""
+    if not texts:
         return texts
+
+    # 优先使用 NVIDIA Kimi K2.5
+    if NVIDIA_API_KEY:
+        print("   使用 NVIDIA Kimi K2.5 翻译...")
+        result = _translate_nvidia(texts)
+        if result:
+            return result
+        print("   NVIDIA 翻译失败，尝试 Gemini 降级...")
+
+    # 降级到 Gemini
+    if GEMINI_API_KEY:
+        print("   使用 Gemini 翻译...")
+        result = _translate_gemini(texts)
+        if result:
+            return result
+
+    print("   翻译不可用，使用英文原文")
+    return texts
+
+
+def has_translate_key() -> bool:
+    """检查是否有任意翻译 API Key"""
+    return bool(NVIDIA_API_KEY or GEMINI_API_KEY)
 
 
 def translate_stories(stories: List[Dict]) -> List[Dict]:
     """翻译 HN 文章标题"""
-    if not stories or not GEMINI_API_KEY:
+    if not stories or not has_translate_key():
         return stories
 
     titles = [s["title"] for s in stories]
@@ -97,10 +151,9 @@ def translate_stories(stories: List[Dict]) -> List[Dict]:
 
 def translate_papers(papers: List[Dict]) -> List[Dict]:
     """翻译 ArXiv 论文标题和摘要"""
-    if not papers or not GEMINI_API_KEY:
+    if not papers or not has_translate_key():
         return papers
 
-    # 标题和摘要一起翻译
     all_texts = []
     for p in papers:
         all_texts.append(p["title"])
@@ -367,15 +420,16 @@ def main():
     print(f"   获取到 {len(arxiv_papers)} 篇")
 
     # 3. AI 翻译为中文
-    if GEMINI_API_KEY:
+    if has_translate_key():
+        provider = "NVIDIA Kimi" if NVIDIA_API_KEY else "Gemini"
         print("")
-        print("🌐 正在翻译为中文（Gemini）...")
+        print(f"🌐 正在翻译为中文（{provider}）...")
         hn_stories = translate_stories(hn_stories)
         print(f"   HN 标题翻译完成")
         arxiv_papers = translate_papers(arxiv_papers)
         print(f"   论文翻译完成")
     else:
-        print("\n⚠️ 未配置 GEMINI_API_KEY，跳过中文翻译")
+        print("\n⚠️ 未配置翻译 API Key（NVIDIA_API_KEY 或 GEMINI_API_KEY），跳过中文翻译")
 
     # 4. 生成报告
     print("")
