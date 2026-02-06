@@ -12,7 +12,7 @@ on:
 jobs:
   push-news:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - name: 检出代码
