@@ -16,6 +16,7 @@ import time
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # 抓取数量配置
 HN_TOP_N = int(os.getenv("HN_TOP_N", "10"))
@@ -32,6 +33,84 @@ CATEGORY_CN = {
     "cs.IR": "信息检索",
     "stat.ML": "统计机器学习",
 }
+
+
+# ========== Gemini 翻译 ==========
+def translate_texts(texts: List[str]) -> List[str]:
+    """使用 Gemini API 批量翻译英文为中文"""
+    if not GEMINI_API_KEY or not texts:
+        return texts
+
+    # 构建批量翻译 prompt
+    numbered = "\n".join([f"{i+1}. {t}" for i, t in enumerate(texts)])
+    prompt = (
+        "请将以下英文文本逐条翻译为简洁的中文，保持编号格式。"
+        "只输出翻译结果，不要加任何解释。"
+        "专有名词（如公司名、产品名、人名）保留英文原文。\n\n"
+        f"{numbered}"
+    )
+
+    try:
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=30
+        )
+        data = resp.json()
+        result_text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+        # 解析编号结果
+        translated = []
+        for line in result_text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # 去掉编号前缀如 "1. " "1、" "1."
+            for prefix_len in range(1, 5):
+                if line[prefix_len:prefix_len+1] in ".、" and line[:prefix_len].isdigit():
+                    line = line[prefix_len+1:].strip()
+                    break
+            translated.append(line)
+
+        if len(translated) == len(texts):
+            return translated
+        else:
+            print(f"翻译结果数量不匹配（期望 {len(texts)}，得到 {len(translated)}），使用原文")
+            return texts
+
+    except Exception as e:
+        print(f"Gemini 翻译失败: {e}")
+        return texts
+
+
+def translate_stories(stories: List[Dict]) -> List[Dict]:
+    """翻译 HN 文章标题"""
+    if not stories or not GEMINI_API_KEY:
+        return stories
+
+    titles = [s["title"] for s in stories]
+    translated = translate_texts(titles)
+    for i, s in enumerate(stories):
+        s["title_cn"] = translated[i]
+    return stories
+
+
+def translate_papers(papers: List[Dict]) -> List[Dict]:
+    """翻译 ArXiv 论文标题和摘要"""
+    if not papers or not GEMINI_API_KEY:
+        return papers
+
+    # 标题和摘要一起翻译
+    all_texts = []
+    for p in papers:
+        all_texts.append(p["title"])
+        all_texts.append(p["summary"])
+
+    translated = translate_texts(all_texts)
+    for i, p in enumerate(papers):
+        p["title_cn"] = translated[i * 2]
+        p["summary_cn"] = translated[i * 2 + 1]
+    return papers
 
 
 # ========== Hacker News ==========
@@ -136,7 +215,10 @@ def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
         lines.append("## 🔥 技术社区热门（Hacker News）")
         lines.append("")
         for i, story in enumerate(hn_stories, 1):
-            lines.append(f"**{i}. [{story['title']}]({story['url']})**")
+            title_display = story.get('title_cn', story['title'])
+            lines.append(f"**{i}. [{title_display}]({story['url']})**")
+            if title_display != story['title']:
+                lines.append(f"   原标题：{story['title']}")
             lines.append(f"   👍 {story['score']}人点赞 | 💬 {story['comments']}条评论")
             lines.append("")
     else:
@@ -150,8 +232,10 @@ def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
         lines.append("")
         for i, paper in enumerate(arxiv_papers, 1):
             cat_cn = CATEGORY_CN.get(paper['category'], paper['category'])
-            lines.append(f"**{i}. 【{cat_cn}】{paper['title']}**")
-            lines.append(f"   {paper['summary']}")
+            title_display = paper.get('title_cn', paper['title'])
+            summary_display = paper.get('summary_cn', paper['summary'])
+            lines.append(f"**{i}. 【{cat_cn}】{title_display}**")
+            lines.append(f"   {summary_display}")
             lines.append(f"   🔗 [查看论文]({paper['url']})")
             lines.append("")
     else:
@@ -182,7 +266,8 @@ def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str
         lines.append("🔥 技术社区热门（Hacker News）")
         lines.append("")
         for i, story in enumerate(hn_stories, 1):
-            lines.append(f"{i}. {story['title']}")
+            title_display = story.get('title_cn', story['title'])
+            lines.append(f"{i}. {title_display}")
             lines.append(f"   👍{story['score']}人点赞 💬{story['comments']}条评论")
             lines.append(f"   {story['url']}")
             lines.append("")
@@ -193,7 +278,8 @@ def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str
         lines.append("")
         for i, paper in enumerate(arxiv_papers, 1):
             cat_cn = CATEGORY_CN.get(paper['category'], paper['category'])
-            lines.append(f"{i}. 【{cat_cn}】{paper['title']}")
+            title_display = paper.get('title_cn', paper['title'])
+            lines.append(f"{i}. 【{cat_cn}】{title_display}")
             lines.append(f"   {paper['url']}")
             lines.append("")
 
@@ -280,13 +366,24 @@ def main():
     arxiv_papers = fetch_arxiv_papers(n=ARXIV_TOP_N)
     print(f"   获取到 {len(arxiv_papers)} 篇")
 
-    # 3. 生成报告
+    # 3. AI 翻译为中文
+    if GEMINI_API_KEY:
+        print("")
+        print("🌐 正在翻译为中文（Gemini）...")
+        hn_stories = translate_stories(hn_stories)
+        print(f"   HN 标题翻译完成")
+        arxiv_papers = translate_papers(arxiv_papers)
+        print(f"   论文翻译完成")
+    else:
+        print("\n⚠️ 未配置 GEMINI_API_KEY，跳过中文翻译")
+
+    # 4. 生成报告
     print("")
     print("📝 正在生成报告...")
     report_md = format_report(hn_stories, arxiv_papers)
     report_plain = format_report_plain(hn_stories, arxiv_papers)
 
-    # 4. 推送
+    # 5. 推送
     print("")
     print("📤 正在推送...")
 
