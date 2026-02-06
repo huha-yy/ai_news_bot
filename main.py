@@ -21,6 +21,18 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 HN_TOP_N = int(os.getenv("HN_TOP_N", "10"))
 ARXIV_TOP_N = int(os.getenv("ARXIV_TOP_N", "5"))
 
+# ArXiv 分类中文映射
+CATEGORY_CN = {
+    "cs.AI": "人工智能",
+    "cs.LG": "机器学习",
+    "cs.CL": "自然语言处理",
+    "cs.CV": "计算机视觉",
+    "cs.RO": "机器人",
+    "cs.NE": "神经网络",
+    "cs.IR": "信息检索",
+    "stat.ML": "统计机器学习",
+}
+
 
 # ========== Hacker News ==========
 def fetch_hn_top_stories(n: int = 10) -> List[Dict]:
@@ -121,34 +133,37 @@ def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
 
     # Hacker News 部分
     if hn_stories:
-        lines.append("## 🔥 Hacker News 热门")
+        lines.append("## 🔥 技术社区热门（Hacker News）")
         lines.append("")
         for i, story in enumerate(hn_stories, 1):
             lines.append(f"**{i}. [{story['title']}]({story['url']})**")
-            lines.append(f"   ⬆️ {story['score']} | 💬 {story['comments']}")
+            lines.append(f"   👍 {story['score']}人点赞 | 💬 {story['comments']}条评论")
             lines.append("")
     else:
-        lines.append("## 🔥 Hacker News")
+        lines.append("## 🔥 技术社区热门（Hacker News）")
         lines.append("暂无数据")
         lines.append("")
 
     # ArXiv 部分
     if arxiv_papers:
-        lines.append("## 📚 ArXiv AI 论文精选")
+        lines.append("## 📚 AI 前沿论文（ArXiv）")
         lines.append("")
         for i, paper in enumerate(arxiv_papers, 1):
-            lines.append(f"**{i}. [{paper['category']}] {paper['title']}**")
+            cat_cn = CATEGORY_CN.get(paper['category'], paper['category'])
+            lines.append(f"**{i}. 【{cat_cn}】{paper['title']}**")
             lines.append(f"   {paper['summary']}")
-            lines.append(f"   🔗 [论文链接]({paper['url']})")
+            lines.append(f"   🔗 [查看论文]({paper['url']})")
             lines.append("")
     else:
-        lines.append("## 📚 ArXiv AI 论文")
+        lines.append("## 📚 AI 前沿论文（ArXiv）")
         lines.append("暂无数据")
         lines.append("")
 
-    # 生成时间
+    # 数据来源说明
     lines.append("---")
-    lines.append(f"*生成时间: {datetime.now().strftime('%H:%M')}*")
+    lines.append("📌 **数据来源：** 技术热点来自 Hacker News 社区，论文来自 ArXiv 学术平台")
+    lines.append("")
+    lines.append(f"⏰ *生成时间: {datetime.now().strftime('%H:%M')}*")
 
     return "\n".join(lines)
 
@@ -164,24 +179,26 @@ def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str
 
     # Hacker News 部分
     if hn_stories:
-        lines.append("🔥 Hacker News 热门")
+        lines.append("🔥 技术社区热门（Hacker News）")
         lines.append("")
         for i, story in enumerate(hn_stories, 1):
             lines.append(f"{i}. {story['title']}")
-            lines.append(f"   ⬆️{story['score']} 💬{story['comments']}")
+            lines.append(f"   👍{story['score']}人点赞 💬{story['comments']}条评论")
             lines.append(f"   {story['url']}")
             lines.append("")
 
     # ArXiv 部分
     if arxiv_papers:
-        lines.append("📚 ArXiv AI 论文精选")
+        lines.append("📚 AI 前沿论文（ArXiv）")
         lines.append("")
         for i, paper in enumerate(arxiv_papers, 1):
-            lines.append(f"{i}. [{paper['category']}] {paper['title']}")
+            cat_cn = CATEGORY_CN.get(paper['category'], paper['category'])
+            lines.append(f"{i}. 【{cat_cn}】{paper['title']}")
             lines.append(f"   {paper['url']}")
             lines.append("")
 
-    lines.append(f"生成时间: {datetime.now().strftime('%H:%M')}")
+    lines.append(f"📌 数据来源：Hacker News 社区 + ArXiv 学术平台")
+    lines.append(f"⏰ 生成时间: {datetime.now().strftime('%H:%M')}")
 
     return "\n".join(lines)
 
