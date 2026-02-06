@@ -36,7 +36,7 @@ CATEGORY_CN = {
 }
 
 
-# ========== AI 翻译 ==========
+# ========== AI 翻译与摘要 ==========
 TRANSLATE_PROMPT = (
     "请将以下英文文本逐条翻译为简洁的中文，保持编号格式。"
     "只输出翻译结果，不要加任何解释。"
@@ -45,7 +45,7 @@ TRANSLATE_PROMPT = (
 
 
 def _parse_numbered_result(result_text: str, expected_count: int) -> Optional[List[str]]:
-    """解析编号格式的翻译结果"""
+    """解析编号格式的结果"""
     translated = []
     for line in result_text.strip().split("\n"):
         line = line.strip()
@@ -60,75 +60,62 @@ def _parse_numbered_result(result_text: str, expected_count: int) -> Optional[Li
 
     if len(translated) == expected_count:
         return translated
-    print(f"翻译结果数量不匹配（期望 {expected_count}，得到 {len(translated)}）")
+    print(f"   结果数量不匹配（期望 {expected_count}，得到 {len(translated)}）")
     return None
 
 
-def _translate_nvidia(texts: List[str]) -> Optional[List[str]]:
-    """使用 NVIDIA Kimi K2.5 翻译"""
-    numbered = "\n".join([f"{i+1}. {t}" for i, t in enumerate(texts)])
-    try:
-        resp = requests.post(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                "Accept": "application/json",
-            },
-            json={
-                "model": "moonshotai/kimi-k2.5",
-                "messages": [{"role": "user", "content": TRANSLATE_PROMPT + numbered}],
-                "max_tokens": 4096,
-                "temperature": 0.3,
-                "stream": False,
-            },
-            timeout=60
-        )
-        data = resp.json()
-        result_text = data["choices"][0]["message"]["content"]
-        return _parse_numbered_result(result_text, len(texts))
-    except Exception as e:
-        print(f"NVIDIA Kimi 翻译失败: {e}")
-        return None
+def _call_llm(prompt: str, max_tokens: int = 8192) -> Optional[str]:
+    """调用 LLM，优先 NVIDIA Kimi K2.5，降级 Gemini"""
+    if NVIDIA_API_KEY:
+        try:
+            resp = requests.post(
+                "https://integrate.api.nvidia.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {NVIDIA_API_KEY}",
+                    "Accept": "application/json",
+                },
+                json={
+                    "model": "moonshotai/kimi-k2.5",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.3,
+                    "stream": False,
+                },
+                timeout=90
+            )
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as e:
+            print(f"   NVIDIA Kimi 调用失败: {e}")
 
+    if GEMINI_API_KEY:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
+                json={"contents": [{"parts": [{"text": prompt}]}]},
+                timeout=60
+            )
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except Exception as e:
+            print(f"   Gemini 调用失败: {e}")
 
-def _translate_gemini(texts: List[str]) -> Optional[List[str]]:
-    """使用 Gemini 翻译"""
-    numbered = "\n".join([f"{i+1}. {t}" for i, t in enumerate(texts)])
-    try:
-        resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
-            json={"contents": [{"parts": [{"text": TRANSLATE_PROMPT + numbered}]}]},
-            timeout=30
-        )
-        data = resp.json()
-        result_text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return _parse_numbered_result(result_text, len(texts))
-    except Exception as e:
-        print(f"Gemini 翻译失败: {e}")
-        return None
+    return None
 
 
 def translate_texts(texts: List[str]) -> List[str]:
-    """批量翻译：优先 NVIDIA Kimi，降级 Gemini，都失败返回原文"""
+    """批量翻译文本"""
     if not texts:
         return texts
 
-    # 优先使用 NVIDIA Kimi K2.5
-    if NVIDIA_API_KEY:
-        print("   使用 NVIDIA Kimi K2.5 翻译...")
-        result = _translate_nvidia(texts)
-        if result:
-            return result
-        print("   NVIDIA 翻译失败，尝试 Gemini 降级...")
+    numbered = "\n".join([f"{i+1}. {t}" for i, t in enumerate(texts)])
+    result = _call_llm(TRANSLATE_PROMPT + numbered)
+    if result:
+        parsed = _parse_numbered_result(result, len(texts))
+        if parsed:
+            return parsed
 
-    # 降级到 Gemini
-    if GEMINI_API_KEY:
-        print("   使用 Gemini 翻译...")
-        result = _translate_gemini(texts)
-        if result:
-            return result
-
-    print("   翻译不可用，使用英文原文")
+    print("   翻译失败，使用英文原文")
     return texts
 
 
@@ -137,15 +124,35 @@ def has_translate_key() -> bool:
     return bool(NVIDIA_API_KEY or GEMINI_API_KEY)
 
 
-def translate_stories(stories: List[Dict]) -> List[Dict]:
-    """翻译 HN 文章标题"""
+def summarize_stories(stories: List[Dict]) -> List[Dict]:
+    """为 HN 文章生成中文标题和简介"""
     if not stories or not has_translate_key():
         return stories
 
+    # 翻译标题
+    print("   翻译标题...")
     titles = [s["title"] for s in stories]
-    translated = translate_texts(titles)
+    translated_titles = translate_texts(titles)
     for i, s in enumerate(stories):
-        s["title_cn"] = translated[i]
+        s["title_cn"] = translated_titles[i]
+
+    # 生成中文简介
+    print("   生成简介...")
+    numbered = "\n".join([f"{i+1}. {s['title']}" for i, s in enumerate(stories)])
+    prompt = (
+        "以下是技术社区的热门文章标题。请根据每个标题，用中文写一句话简介（30-60字），"
+        "帮助读者快速了解文章可能讨论的核心内容或背景。保持编号格式，每行一条。"
+        "只输出简介，不要重复标题。\n\n"
+        f"{numbered}"
+    )
+
+    result = _call_llm(prompt)
+    if result:
+        summaries = _parse_numbered_result(result, len(stories))
+        if summaries:
+            for i, s in enumerate(stories):
+                s["summary_cn"] = summaries[i]
+
     return stories
 
 
@@ -242,7 +249,7 @@ def fetch_arxiv_papers(categories: List[str] = None, n: int = 5) -> List[Dict]:
             if title is not None:
                 papers.append({
                     "title": " ".join(title.text.split()),  # 清理空白
-                    "summary": " ".join(summary.text.split())[:200] + "..." if summary is not None else "",
+                    "summary": " ".join(summary.text.split()) if summary is not None else "",
                     "url": link.text if link is not None else "",
                     "category": primary_cat,
                 })
@@ -270,8 +277,8 @@ def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
         for i, story in enumerate(hn_stories, 1):
             title_display = story.get('title_cn', story['title'])
             lines.append(f"**{i}. [{title_display}]({story['url']})**")
-            if title_display != story['title']:
-                lines.append(f"   原标题：{story['title']}")
+            if 'summary_cn' in story:
+                lines.append(f"   📝 {story['summary_cn']}")
             lines.append(f"   👍 {story['score']}人点赞 | 💬 {story['comments']}条评论")
             lines.append("")
     else:
@@ -321,6 +328,8 @@ def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str
         for i, story in enumerate(hn_stories, 1):
             title_display = story.get('title_cn', story['title'])
             lines.append(f"{i}. {title_display}")
+            if 'summary_cn' in story:
+                lines.append(f"   📝 {story['summary_cn']}")
             lines.append(f"   👍{story['score']}人点赞 💬{story['comments']}条评论")
             lines.append(f"   {story['url']}")
             lines.append("")
@@ -419,13 +428,13 @@ def main():
     arxiv_papers = fetch_arxiv_papers(n=ARXIV_TOP_N)
     print(f"   获取到 {len(arxiv_papers)} 篇")
 
-    # 3. AI 翻译为中文
+    # 3. AI 翻译与摘要
     if has_translate_key():
         provider = "NVIDIA Kimi" if NVIDIA_API_KEY else "Gemini"
         print("")
-        print(f"🌐 正在翻译为中文（{provider}）...")
-        hn_stories = translate_stories(hn_stories)
-        print(f"   HN 标题翻译完成")
+        print(f"🌐 正在生成中文内容（{provider}）...")
+        hn_stories = summarize_stories(hn_stories)
+        print(f"   HN 标题和简介完成")
         arxiv_papers = translate_papers(arxiv_papers)
         print(f"   论文翻译完成")
     else:
