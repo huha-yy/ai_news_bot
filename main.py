@@ -6,6 +6,7 @@ AI 热点新闻聚合推送系统
 """
 
 import os
+import re
 import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -64,6 +65,11 @@ def _parse_numbered_result(result_text: str, expected_count: int) -> Optional[Li
     return None
 
 
+def _strip_thinking(text: str) -> str:
+    """去除 Kimi 思考模型的 <think>...</think> 标签"""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 def _call_llm(prompt: str, max_tokens: int = 8192) -> Optional[str]:
     """调用 LLM，优先 NVIDIA Kimi K2.5，降级 Gemini"""
     if NVIDIA_API_KEY:
@@ -84,7 +90,8 @@ def _call_llm(prompt: str, max_tokens: int = 8192) -> Optional[str]:
                 timeout=90
             )
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            return _strip_thinking(content)
         except Exception as e:
             print(f"   NVIDIA Kimi 调用失败: {e}")
 
