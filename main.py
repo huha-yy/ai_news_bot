@@ -163,20 +163,38 @@ def summarize_stories(stories: List[Dict]) -> List[Dict]:
     return stories
 
 
+def _translate_single(text: str) -> str:
+    """翻译单段长文本（用于摘要等）"""
+    prompt = (
+        "请将以下英文文本翻译为中文，保持专业术语准确。"
+        "专有名词（如公司名、产品名、人名、模型名）保留英文原文。"
+        "只输出翻译结果，不要加任何解释。\n\n"
+        f"{text}"
+    )
+    result = _call_llm(prompt, max_tokens=4096)
+    if result:
+        return result.strip()
+    return text
+
+
 def translate_papers(papers: List[Dict]) -> List[Dict]:
     """翻译 ArXiv 论文标题和摘要"""
     if not papers or not has_translate_key():
         return papers
 
-    all_texts = []
-    for p in papers:
-        all_texts.append(p["title"])
-        all_texts.append(p["summary"])
-
-    translated = translate_texts(all_texts)
+    # 标题批量翻译（短文本，编号格式可靠）
+    print("   翻译论文标题...")
+    titles = [p["title"] for p in papers]
+    translated_titles = translate_texts(titles)
     for i, p in enumerate(papers):
-        p["title_cn"] = translated[i * 2]
-        p["summary_cn"] = translated[i * 2 + 1]
+        p["title_cn"] = translated_titles[i]
+
+    # 摘要逐条翻译（长文本，单独处理更可靠）
+    print("   翻译论文摘要...")
+    for i, p in enumerate(papers):
+        print(f"   [{i+1}/{len(papers)}] {p['title'][:50]}...")
+        p["summary_cn"] = _translate_single(p["summary"])
+
     return papers
 
 
