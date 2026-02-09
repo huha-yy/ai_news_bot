@@ -36,6 +36,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           HN_TOP_N: ${{ vars.HN_TOP_N || '10' }}
           ARXIV_TOP_N: ${{ vars.ARXIV_TOP_N || '5' }}
+          GH_TRENDING_N: ${{ vars.GH_TRENDING_N || '10' }}
         run: |
           echo "=========================================="
           echo "🤖 AI 热点新闻聚合推送"

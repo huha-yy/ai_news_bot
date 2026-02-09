@@ -2,12 +2,14 @@
 """
 AI 热点新闻聚合推送系统
 - Hacker News 技术热点
+- GitHub Trending 热门项目
 - ArXiv AI 论文精选
 """
 
 import os
 import re
 import requests
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 import time
@@ -23,6 +25,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # 抓取数量配置
 HN_TOP_N = int(os.getenv("HN_TOP_N", "10"))
 ARXIV_TOP_N = int(os.getenv("ARXIV_TOP_N", "5"))
+GH_TRENDING_N = int(os.getenv("GH_TRENDING_N", "10"))
 
 # ArXiv 分类中文映射
 CATEGORY_CN = {
@@ -285,8 +288,84 @@ def fetch_arxiv_papers(categories: List[str] = None, n: int = 5) -> List[Dict]:
         return []
 
 
+# ========== GitHub Trending ==========
+def fetch_github_trending(n: int = 10) -> List[Dict]:
+    """抓取 GitHub Trending 热门项目"""
+    try:
+        resp = requests.get(
+            "https://github.com/trending?since=daily",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AINewsBot/1.0)"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        repos = []
+        for article in soup.select("article.Box-row")[:n]:
+            # 仓库名 (owner/repo)
+            h2 = article.select_one("h2 a")
+            if not h2:
+                continue
+            name = "/".join(s.strip() for s in h2.text.strip().split("/"))
+            url = "https://github.com" + h2["href"].strip()
+
+            # 描述
+            desc_tag = article.select_one("p")
+            description = desc_tag.text.strip() if desc_tag else ""
+
+            # 编程语言
+            lang_tag = article.select_one("[itemprop='programmingLanguage']")
+            language = lang_tag.text.strip() if lang_tag else ""
+
+            # 总 stars
+            stars_total = ""
+            star_links = article.select("a.Link--muted")
+            if star_links:
+                stars_total = star_links[0].text.strip().replace(",", "")
+
+            # 今日新增 stars
+            stars_today = ""
+            today_span = article.select_one("span.d-inline-block.float-sm-right")
+            if today_span:
+                stars_today = today_span.text.strip().split()[0].replace(",", "")
+
+            repos.append({
+                "name": name,
+                "url": url,
+                "description": description,
+                "language": language,
+                "stars_total": stars_total,
+                "stars_today": stars_today,
+            })
+
+        return repos
+    except Exception as e:
+        print(f"获取 GitHub Trending 失败: {e}")
+        return []
+
+
+def translate_trending(repos: List[Dict]) -> List[Dict]:
+    """翻译 GitHub Trending 项目描述"""
+    if not repos or not has_translate_key():
+        return repos
+
+    descriptions = [r["description"] for r in repos]
+    # 过滤掉空描述，记录索引
+    non_empty = [(i, d) for i, d in enumerate(descriptions) if d]
+    if not non_empty:
+        return repos
+
+    print("   翻译项目描述...")
+    texts = [d for _, d in non_empty]
+    translated = translate_texts(texts)
+    for j, (i, _) in enumerate(non_empty):
+        repos[i]["description_cn"] = translated[j]
+
+    return repos
+
+
 # ========== 消息格式化 ==========
-def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
+def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict], trending_repos: List[Dict] = None) -> str:
     """格式化报告内容"""
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -311,6 +390,26 @@ def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
         lines.append("暂无数据")
         lines.append("")
 
+    # GitHub Trending 部分
+    if trending_repos:
+        lines.append("## 🌟 GitHub 今日热门项目")
+        lines.append("")
+        for i, repo in enumerate(trending_repos, 1):
+            desc_display = repo.get("description_cn", repo["description"]) or "暂无描述"
+            stars_today_str = f"⭐ +{repo['stars_today']} today" if repo["stars_today"] else ""
+            stars_total_str = f"总 Stars: {repo['stars_total']}" if repo["stars_total"] else ""
+            meta_parts = [p for p in [stars_today_str, stars_total_str] if p]
+            meta = " | ".join(meta_parts)
+            lines.append(f"**{i}. [{repo['name']}]({repo['url']})** {meta}")
+            lines.append(f"   {desc_display}")
+            if repo["language"]:
+                lines.append(f"   语言: {repo['language']}")
+            lines.append("")
+    elif trending_repos is not None:
+        lines.append("## 🌟 GitHub 今日热门项目")
+        lines.append("暂无数据")
+        lines.append("")
+
     # ArXiv 部分
     if arxiv_papers:
         lines.append("## 📚 AI 前沿论文（ArXiv）")
@@ -330,14 +429,14 @@ def format_report(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
 
     # 数据来源说明
     lines.append("---")
-    lines.append("📌 **数据来源：** 技术热点来自 Hacker News 社区，论文来自 ArXiv 学术平台")
+    lines.append("📌 **数据来源：** 技术热点来自 Hacker News 社区，热门项目来自 GitHub Trending，论文来自 ArXiv 学术平台")
     lines.append("")
     lines.append(f"⏰ *生成时间: {datetime.now().strftime('%H:%M')}*")
 
     return "\n".join(lines)
 
 
-def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str:
+def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict], trending_repos: List[Dict] = None) -> str:
     """格式化纯文本报告（用于 Telegram）"""
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -359,6 +458,23 @@ def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str
             lines.append(f"   {story['url']}")
             lines.append("")
 
+    # GitHub Trending 部分
+    if trending_repos:
+        lines.append("🌟 GitHub 今日热门项目")
+        lines.append("")
+        for i, repo in enumerate(trending_repos, 1):
+            desc_display = repo.get("description_cn", repo["description"]) or "暂无描述"
+            stars_today_str = f"⭐+{repo['stars_today']} today" if repo["stars_today"] else ""
+            stars_total_str = f"总Stars: {repo['stars_total']}" if repo["stars_total"] else ""
+            meta_parts = [p for p in [stars_today_str, stars_total_str] if p]
+            meta = " | ".join(meta_parts)
+            lines.append(f"{i}. {repo['name']} {meta}")
+            lines.append(f"   {desc_display}")
+            if repo["language"]:
+                lines.append(f"   语言: {repo['language']}")
+            lines.append(f"   {repo['url']}")
+            lines.append("")
+
     # ArXiv 部分
     if arxiv_papers:
         lines.append("📚 AI 前沿论文（ArXiv）")
@@ -370,7 +486,7 @@ def format_report_plain(hn_stories: List[Dict], arxiv_papers: List[Dict]) -> str
             lines.append(f"   {paper['url']}")
             lines.append("")
 
-    lines.append(f"📌 数据来源：Hacker News 社区 + ArXiv 学术平台")
+    lines.append(f"📌 数据来源：Hacker News 社区 + GitHub Trending + ArXiv 学术平台")
     lines.append(f"⏰ 生成时间: {datetime.now().strftime('%H:%M')}")
 
     return "\n".join(lines)
@@ -453,25 +569,32 @@ def main():
     arxiv_papers = fetch_arxiv_papers(n=ARXIV_TOP_N)
     print(f"   获取到 {len(arxiv_papers)} 篇")
 
-    # 3. AI 翻译与摘要
+    # 3. 获取 GitHub Trending
+    print(f"📡 正在获取 GitHub Trending Top {GH_TRENDING_N}...")
+    trending_repos = fetch_github_trending(GH_TRENDING_N)
+    print(f"   获取到 {len(trending_repos)} 个项目")
+
+    # 4. AI 翻译与摘要
     if has_translate_key():
         provider = "NVIDIA Kimi" if NVIDIA_API_KEY else "Gemini"
         print("")
         print(f"🌐 正在生成中文内容（{provider}）...")
         hn_stories = summarize_stories(hn_stories)
         print(f"   HN 标题和简介完成")
+        trending_repos = translate_trending(trending_repos)
+        print(f"   GitHub Trending 描述翻译完成")
         arxiv_papers = translate_papers(arxiv_papers)
         print(f"   论文翻译完成")
     else:
         print("\n⚠️ 未配置翻译 API Key（NVIDIA_API_KEY 或 GEMINI_API_KEY），跳过中文翻译")
 
-    # 4. 生成报告
+    # 5. 生成报告
     print("")
     print("📝 正在生成报告...")
-    report_md = format_report(hn_stories, arxiv_papers)
-    report_plain = format_report_plain(hn_stories, arxiv_papers)
+    report_md = format_report(hn_stories, arxiv_papers, trending_repos)
+    report_plain = format_report_plain(hn_stories, arxiv_papers, trending_repos)
 
-    # 5. 推送
+    # 6. 推送
     print("")
     print("📤 正在推送...")
 
